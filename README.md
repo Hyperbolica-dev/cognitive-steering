@@ -2,6 +2,24 @@
 
 长会话里，上下文压缩可能省略早先给出的工作原则中的细节。Cognitive Steering 在固定时点把你选定的推理指令补回 Codex 的上下文。例如，Codex 压缩一段代码审查会话后，会重新收到完整的审查原则。随后每次提交消息，以及该会话每累计完成十次可观测的工具调用时，它会收到一条简短提醒。
 
+## 交给 Agent 安装
+
+把下面整段复制给能执行本地终端命令的 Agent：
+
+```text
+请在这台机器的 Codex 中安装 Cognitive Steering：
+https://github.com/Hyperbolica-dev/cognitive-steering
+
+1. 检查 codex 和 python3 是否可用。插件支持 Linux 和 macOS，需要 Python 3.11 或更高版本。
+2. 检查 codex plugin marketplace list --json。如果尚未添加 hyperbolica-dev，运行：
+   codex plugin marketplace add hyperbolica-dev/cognitive-steering
+3. 用 codex plugin list --marketplace hyperbolica-dev --json 检查安装状态。
+   如果插件尚未安装或启用，运行：
+   codex plugin add cognitive-steering@hyperbolica-dev
+4. 再检查一次插件列表，确认 cognitive-steering@hyperbolica-dev 已安装且 enabled 为 true，并告诉我安装的版本。遇到失败时，告诉我失败的命令和报错。
+5. 安装成功后，告诉我在 Codex 桌面的「设置 → Hooks」或 CLI 的 /hooks 中信任该插件的三个 Hook。信任后重新打开当前会话，加载 instruct.md。
+```
+
 ## 安装
 
 需要支持插件 Hook 的本地 Codex，以及 PATH 中的 Python 3.11 或以上。以下命令适用于 Linux 和 macOS。从 GitHub 安装：
