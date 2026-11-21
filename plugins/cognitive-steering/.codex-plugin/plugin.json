@@ -1,0 +1,17 @@
+{
+  "name": "cognitive-steering",
+  "version": "0.1.0",
+  "description": "Restore reasoning instructions at Codex session, turn, and tool-call boundaries.",
+  "author": {
+    "name": "hyperbolica-dev",
+    "url": "https://github.com/hyperbolica-dev"
+  },
+  "repository": "https://github.com/hyperbolica-dev/cognitive-steering",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Cognitive Steering",
+    "shortDescription": "Periodic reinforcement of reasoning instructions.",
+    "developerName": "hyperbolica-dev",
+    "category": "Productivity"
+  }
+}

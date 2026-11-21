@@ -1,0 +1,20 @@
+{
+  "name": "hyperbolica-dev",
+  "interface": {
+    "displayName": "hyperbolica-dev"
+  },
+  "plugins": [
+    {
+      "name": "cognitive-steering",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cognitive-steering"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
