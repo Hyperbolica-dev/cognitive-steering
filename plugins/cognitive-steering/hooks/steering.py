@@ -10,9 +10,23 @@ from typing import Callable, Optional
 
 
 REMINDER_INTERVAL = 10
-MAX_CONTEXT_BYTES = 8192
+MAX_CONTEXT_BYTES = 16 * 1024
 SESSION_SOURCES = ("startup", "resume", "clear", "compact", "fork")
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+CHECKTONE_CONTEXT = (
+    "依据完整指令直接给出上一轮输出或指定对象的修订。"
+    "仅在用户主动询问时说明修订原因。涉及文件时遵守用户授权范围。"
+)
+
+
+def is_checktone(event):
+    if event.get("hook_event_name") != "UserPromptSubmit":
+        return False
+    prompt = event.get("prompt")
+    if not isinstance(prompt, str):
+        return False
+    command = prompt.strip().split(maxsplit=1)
+    return bool(command and command[0] in ("/checktone", "checktone"))
 
 
 @dataclass(frozen=True)
@@ -68,7 +82,7 @@ def select_instruction(event, drift_feedback: Optional[DriftFeedback] = None):
     if event_name == "SessionStart":
         return "instruct.md" if event.get("source") in SESSION_SOURCES else None
     if event_name == "UserPromptSubmit":
-        return "reminder.md"
+        return "instruct.md" if is_checktone(event) else "reminder.md"
     if event_name != "PostToolUse":
         return None
 
@@ -87,21 +101,41 @@ def select_instruction(event, drift_feedback: Optional[DriftFeedback] = None):
 
 
 def read_instruction(filename):
+    override_error = None
     if os.environ.get("PLUGIN_DATA"):
         try:
             with (data_directory() / filename).open("rb") as source:
-                return decode_instruction(source)
+                return decode_instruction(source), None
         except FileNotFoundError:
             pass
-    with (PLUGIN_ROOT / filename).open("rb") as source:
-        return decode_instruction(source)
+        except (OSError, ValueError) as error:
+            override_error = f"覆盖指令 {filename}{instruction_error(error)}。"
+    try:
+        with (PLUGIN_ROOT / filename).open("rb") as source:
+            context = decode_instruction(source)
+        if not context.strip():
+            raise ValueError("为空")
+    except (OSError, ValueError) as error:
+        return "", f"{override_error or ''}默认指令 {filename}{instruction_error(error)}，本次注入已跳过。"
+    return context, f"{override_error}已回退到默认指令。" if override_error else None
+
+
+def instruction_error(error):
+    if isinstance(error, FileNotFoundError):
+        return "不存在"
+    if isinstance(error, OSError):
+        return "无法读取"
+    return str(error)
 
 
 def decode_instruction(source):
     content = source.read(MAX_CONTEXT_BYTES + 1)
     if len(content) > MAX_CONTEXT_BYTES:
-        raise ValueError("Instruction file exceeds the context limit")
-    return content.decode("utf-8")
+        raise ValueError("超过 16 KiB")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("不是有效的 UTF-8") from None
 
 
 def main():
@@ -111,14 +145,17 @@ def main():
             raise ValueError("Expected a hook event object")
         filename = select_instruction(event)
         if filename is not None:
-            context = read_instruction(filename)
+            context, notice = read_instruction(filename)
+            output = {"systemMessage": notice} if notice else {}
             if context.strip():
-                print(json.dumps({
-                    "hookSpecificOutput": {
-                        "hookEventName": event["hook_event_name"],
-                        "additionalContext": context,
-                    }
-                }))
+                if is_checktone(event):
+                    context = f"{context.rstrip()}\n\n{CHECKTONE_CONTEXT}\n"
+                output["hookSpecificOutput"] = {
+                    "hookEventName": event["hook_event_name"],
+                    "additionalContext": context,
+                }
+            if output:
+                print(json.dumps(output))
     except (OSError, ValueError, sqlite3.Error, RecursionError):
         print("cognitive-steering: skipped an invalid event, instruction, or state update", file=sys.stderr)
 

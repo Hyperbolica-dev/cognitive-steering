@@ -92,10 +92,33 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(agents.read_text("utf-8"), "Existing project instructions")
         self.assertFalse(self.database.exists())
 
+    def test_explicit_feedback_reloads_full_instructions(self):
+        self.data.mkdir()
+        instruction = self.data / "instruct.md"
+        instruction.write_text("Updated principles\n", encoding="utf-8")
+        for prompt in ("/checktone", "  checktone README.md ", "/checktone previous reply"):
+            with self.subTest(prompt=prompt):
+                result = self.invoke("UserPromptSubmit", {"prompt": prompt})
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"], {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": "Updated principles\n\n" + STEERING["CHECKTONE_CONTEXT"] + "\n",
+                })
+        for prompt in ("Explain /checktone", "/checktoner", None, 123):
+            with self.subTest(prompt=prompt):
+                self.assert_context(self.invoke("UserPromptSubmit", {"prompt": prompt}), "UserPromptSubmit", "reminder.md")
+        instruction.write_text("\n", encoding="utf-8")
+        result = self.invoke("UserPromptSubmit", {"prompt": "/checktone"})
+        self.assertEqual((result.stdout, result.stderr), ("", ""))
+        self.assertFalse(self.database.exists())
+
     def test_every_tenth_tool_call_across_turns_and_lifecycle_events(self):
         for index in range(1, 22):
             if index == 6:
                 self.invoke("UserPromptSubmit", {"turn_id": "turn-2"})
+            if index == 8:
+                result = self.invoke("UserPromptSubmit", {"turn_id": "turn-2", "prompt": "checktone"})
+                self.assertIn(STEERING["CHECKTONE_CONTEXT"], json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"])
             if index in (9, 15):
                 self.invoke("SessionStart", {"source": "compact" if index == 9 else "resume"})
             result = self.invoke("PostToolUse", {
@@ -156,16 +179,36 @@ class SteeringTests(unittest.TestCase):
         override.write_bytes(b" \n")
         empty = self.invoke("UserPromptSubmit")
         self.assertEqual((empty.stdout, empty.stderr), ("", ""))
-        for invalid in (b"\xff", b"x" * 8193):
-            override.write_bytes(invalid)
-            result = self.invoke("UserPromptSubmit")
-            self.assertEqual(result.stdout, "")
-            self.assertIn("cognitive-steering:", result.stderr)
-        override.unlink()
-        (self.plugin / "reminder.md").unlink()
-        missing = self.invoke("UserPromptSubmit")
-        self.assertEqual(missing.stdout, "")
-        self.assertIn("cognitive-steering:", missing.stderr)
+        limit = 16 * 1024
+        override.write_bytes(b"x" * limit)
+        at_limit = self.invoke("UserPromptSubmit")
+        self.assertEqual(json.loads(at_limit.stdout)["hookSpecificOutput"]["additionalContext"], "x" * limit)
+        for invalid, reason in ((b"\xff", "不是有效的 UTF-8"), (b"x" * (limit + 1), "超过 16 KiB")):
+            with self.subTest(reason=reason):
+                override.write_bytes(invalid)
+                result = self.invoke("UserPromptSubmit")
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(json.loads(result.stdout), {
+                    "systemMessage": f"覆盖指令 reminder.md{reason}。已回退到默认指令。",
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": (self.plugin / "reminder.md").read_text("utf-8"),
+                    },
+                })
+
+    def test_invalid_default_instruction_reports_error_without_context(self):
+        instruction = self.plugin / "instruct.md"
+        for invalid, reason in ((b"\xff", "不是有效的 UTF-8"), (b" \n", "为空"), (None, "不存在")):
+            with self.subTest(reason=reason):
+                if invalid is None:
+                    instruction.unlink()
+                else:
+                    instruction.write_bytes(invalid)
+                result = self.invoke("SessionStart", {"source": "resume"})
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(json.loads(result.stdout), {
+                    "systemMessage": f"默认指令 instruct.md{reason}，本次注入已跳过。",
+                })
 
     def test_unavailable_state_fails_open_without_fallback_writes(self):
         env = self.environment.copy()

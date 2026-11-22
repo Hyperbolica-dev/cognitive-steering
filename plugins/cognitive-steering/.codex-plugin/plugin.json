@@ -1,6 +1,6 @@
 {
   "name": "cognitive-steering",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Restore reasoning instructions at Codex session, turn, and tool-call boundaries.",
   "author": {
     "name": "hyperbolica-dev",
