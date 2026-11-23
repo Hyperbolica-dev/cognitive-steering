@@ -77,14 +77,14 @@ def record_call(directory, session_id, tool_use_id):
             return ToolProgress(session_key, count)
 
 
-def select_instruction(event, drift_feedback: Optional[DriftFeedback] = None):
+def select_instructions(event, drift_feedback: Optional[DriftFeedback] = None):
     event_name = event.get("hook_event_name")
     if event_name == "SessionStart":
-        return "instruct.md" if event.get("source") in SESSION_SOURCES else None
+        return ("instruct.md",) if event.get("source") in SESSION_SOURCES else ()
     if event_name == "UserPromptSubmit":
-        return "instruct.md" if is_checktone(event) else "reminder.md"
+        return ("instruct.md",) if is_checktone(event) else ("reminder.md",)
     if event_name != "PostToolUse":
-        return None
+        return ()
 
     session_id = event.get("session_id")
     tool_use_id = event.get("tool_use_id")
@@ -92,12 +92,12 @@ def select_instruction(event, drift_feedback: Optional[DriftFeedback] = None):
         raise ValueError("PostToolUse requires session_id and tool_use_id")
     progress = record_call(data_directory(), session_id, tool_use_id)
     if progress is None:
-        return None
+        return ()
     if progress.completed_calls % REMINDER_INTERVAL == 0:
-        return "reminder.md"
+        return ("reminder.md", "post_tool.md")
     if drift_feedback is not None and drift_feedback(progress):
-        return "reminder.md"
-    return None
+        return ("reminder.md", "post_tool.md")
+    return ("post_tool.md",)
 
 
 def read_instruction(filename):
@@ -116,7 +116,7 @@ def read_instruction(filename):
         if not context.strip():
             raise ValueError("为空")
     except (OSError, ValueError) as error:
-        return "", f"{override_error or ''}默认指令 {filename}{instruction_error(error)}，本次注入已跳过。"
+        return "", f"{override_error or ''}默认指令 {filename}{instruction_error(error)}，已跳过该文件的注入。"
     return context, f"{override_error}已回退到默认指令。" if override_error else None
 
 
@@ -143,19 +143,24 @@ def main():
         event = json.load(sys.stdin.buffer)
         if not isinstance(event, dict):
             raise ValueError("Expected a hook event object")
-        filename = select_instruction(event)
-        if filename is not None:
-            context, notice = read_instruction(filename)
-            output = {"systemMessage": notice} if notice else {}
-            if context.strip():
-                if is_checktone(event):
-                    context = f"{context.rstrip()}\n\n{CHECKTONE_CONTEXT}\n"
-                output["hookSpecificOutput"] = {
-                    "hookEventName": event["hook_event_name"],
-                    "additionalContext": context,
-                }
-            if output:
-                print(json.dumps(output))
+        context = ""
+        notices = []
+        for filename in select_instructions(event):
+            instruction, notice = read_instruction(filename)
+            if notice:
+                notices.append(notice)
+            if instruction.strip():
+                context = f"{context.rstrip()}\n\n{instruction}" if context else instruction
+        output = {"systemMessage": " ".join(notices)} if notices else {}
+        if context:
+            if is_checktone(event):
+                context = f"{context.rstrip()}\n\n{CHECKTONE_CONTEXT}\n"
+            output["hookSpecificOutput"] = {
+                "hookEventName": event["hook_event_name"],
+                "additionalContext": context,
+            }
+        if output:
+            print(json.dumps(output))
     except (OSError, ValueError, sqlite3.Error, RecursionError):
         print("cognitive-steering: skipped an invalid event, instruction, or state update", file=sys.stderr)
 

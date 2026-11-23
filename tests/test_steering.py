@@ -47,12 +47,14 @@ class SteeringTests(unittest.TestCase):
             check=True,
         )
 
-    def assert_context(self, result, event, filename):
+    def assert_context(self, result, event, *filenames):
         self.assertEqual(result.stderr, "")
+        contents = [(self.plugin / filename).read_text("utf-8") for filename in filenames]
+        expected = "\n\n".join([part.rstrip() for part in contents[:-1]] + contents[-1:])
         self.assertEqual(json.loads(result.stdout), {
             "hookSpecificOutput": {
                 "hookEventName": event,
-                "additionalContext": (self.plugin / filename).read_text("utf-8"),
+                "additionalContext": expected,
             }
         })
 
@@ -126,9 +128,9 @@ class SteeringTests(unittest.TestCase):
                 "turn_id": "turn-1" if index < 6 else "turn-2",
             })
             if index in (10, 20):
-                self.assert_context(result, "PostToolUse", "reminder.md")
+                self.assert_context(result, "PostToolUse", "reminder.md", "post_tool.md")
             else:
-                self.assertEqual((result.stdout, result.stderr), ("", ""))
+                self.assert_context(result, "PostToolUse", "post_tool.md")
 
     def test_concurrent_deliveries_are_isolated_and_deduplicated(self):
         jobs = [("session-a", index) for index in range(25)]
@@ -144,14 +146,21 @@ class SteeringTests(unittest.TestCase):
                 "tool_response": {"content": "PRIVATE_TOOL_RESPONSE"},
             })
             self.assertEqual(result.stderr, "")
-            if result.stdout:
-                self.assert_context(result, "PostToolUse", "reminder.md")
-            return session_id, bool(result.stdout)
+            if not result.stdout:
+                return session_id, False, False
+            context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            periodic = context.startswith((self.plugin / "reminder.md").read_text("utf-8").rstrip())
+            files = ("reminder.md", "post_tool.md") if periodic else ("post_tool.md",)
+            self.assert_context(result, "PostToolUse", *files)
+            return session_id, True, periodic
 
         with ThreadPoolExecutor(max_workers=12) as pool:
             outcomes = list(pool.map(submit, jobs))
-        self.assertEqual(sum(injected for session, injected in outcomes if session == "session-a"), 2)
-        self.assertEqual(sum(injected for session, injected in outcomes if session == "session-b"), 1)
+        for session_id, calls, reminders in (("session-a", 25, 2), ("session-b", 15, 1)):
+            outcomes_for_session = [(injected, periodic) for session, injected, periodic in outcomes
+                                    if session == session_id]
+            self.assertEqual(sum(injected for injected, _ in outcomes_for_session), calls)
+            self.assertEqual(sum(periodic for _, periodic in outcomes_for_session), reminders)
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(dict(connection.execute("SELECT * FROM counters")), {
                 hashlib.sha256(b"session-a").hexdigest(): 25,
@@ -207,8 +216,29 @@ class SteeringTests(unittest.TestCase):
                 result = self.invoke("SessionStart", {"source": "resume"})
                 self.assertEqual(result.stderr, "")
                 self.assertEqual(json.loads(result.stdout), {
-                    "systemMessage": f"默认指令 instruct.md{reason}，本次注入已跳过。",
+                    "systemMessage": f"默认指令 instruct.md{reason}，已跳过该文件的注入。",
                 })
+
+    def test_post_tool_override_and_periodic_reminder_are_independent(self):
+        self.data.mkdir()
+        override = self.data / "post_tool.md"
+        custom = "回到用户的问题。\n"
+        override.write_text(custom, encoding="utf-8")
+        first = self.invoke("PostToolUse", {"tool_use_id": "call-1"})
+        self.assertEqual(json.loads(first.stdout)["hookSpecificOutput"]["additionalContext"], custom)
+
+        override.write_bytes(b"\xff")
+        second = self.invoke("PostToolUse", {"tool_use_id": "call-2"})
+        fallback = json.loads(second.stdout)
+        self.assertIn("post_tool.md不是有效的 UTF-8。已回退到默认指令。", fallback["systemMessage"])
+        self.assertEqual(fallback["hookSpecificOutput"]["additionalContext"], (self.plugin / "post_tool.md").read_text("utf-8"))
+
+        override.write_text("\n", encoding="utf-8")
+        for index in range(3, 10):
+            result = self.invoke("PostToolUse", {"tool_use_id": f"call-{index}"})
+            self.assertEqual((result.stdout, result.stderr), ("", ""))
+        tenth = self.invoke("PostToolUse", {"tool_use_id": "call-10"})
+        self.assert_context(tenth, "PostToolUse", "reminder.md")
 
     def test_unavailable_state_fails_open_without_fallback_writes(self):
         env = self.environment.copy()
@@ -238,11 +268,11 @@ class SteeringTests(unittest.TestCase):
         def event(call_id):
             return {"hook_event_name": "PostToolUse", "session_id": "feedback-session", "tool_use_id": call_id}
 
-        select = STEERING["select_instruction"]
+        select = STEERING["select_instructions"]
         with patch.dict(os.environ, {"PLUGIN_DATA": str(self.data)}):
-            self.assertIsNone(select(event("a")))
-            self.assertEqual(select(event("b"), drift_feedback=report_drift), "reminder.md")
-            self.assertIsNone(select(event("b"), drift_feedback=report_drift))
+            self.assertEqual(select(event("a")), ("post_tool.md",))
+            self.assertEqual(select(event("b"), drift_feedback=report_drift), ("reminder.md", "post_tool.md"))
+            self.assertEqual(select(event("b"), drift_feedback=report_drift), ())
         self.assertEqual(received, [STEERING["ToolProgress"](
             hashlib.sha256(b"feedback-session").hexdigest(), 2
         )])
