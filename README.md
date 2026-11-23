@@ -17,6 +17,22 @@ Cognitive Steering 是 Codex 的认知纠偏插件。它按会话事件注入工
 
 `checktone` 修订上一轮回答。`checktone README.md` 指定修订对象。当客户端将 `/checktone` 作为普通消息传递时，该写法同样有效。
 
+## 对话对比
+
+> 先用 cat snapshot.py 读取完整源码。这个工具最关键的设计是什么？
+
+关闭 Cognitive Steering
+
+> 最关键的设计是**先发布按内容寻址的快照，再原子切换 `current` 指针**。
+>
+> `save()` 用内容的 SHA-256 作为快照文件名，相同内容可以复用同一份快照。它先确保快照文件已经发布，再把新 ID 写入同目录的临时文件，通过 `os.replace()` 原子替换 `current`。
+>
+> 因此，并发读取时，`load()` 读到的要么是旧 ID，要么是新 ID，两者都指向已完整发布的快照。如果保存中途在切换 `current` 前失败，已有的 `current` 仍指向旧快照。
+
+启用 Cognitive Steering
+
+> 最关键的是把快照写入和版本切换分开。先按内容哈希存好快照，再原子替换 `current` 指针，读者只会看到完整的旧版或新版。
+
 ## 安装与升级
 
 需要支持 Hook 的本地 Codex 和 Python 3.11+（Linux 或 macOS）。
